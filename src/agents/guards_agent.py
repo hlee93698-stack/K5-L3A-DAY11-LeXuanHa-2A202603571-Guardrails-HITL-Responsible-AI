@@ -370,6 +370,7 @@ def create_red_agent_advance():
     from core.config import (
         red_uses_openai_sdk,
         red_uses_gemini,
+        red_uses_anthropic,
         red_provider_label,
         get_red_model,
     )
@@ -395,6 +396,19 @@ def create_red_agent_advance():
         print(label)
         return agent, runner
 
+    if red_uses_anthropic():
+        from core.anthropic_runtime import create_anthropic_pair
+
+        agent, runner = create_anthropic_pair(
+            name="red_agent_advance",
+            instruction=RED_ADVANCE_INSTRUCTION,
+            app_name="red_agent_advance",
+            plugins=[RedAdvanceGuardPlugin(nemo_guard, runtime="openai")],
+            model=advance_model,
+        )
+        print(label)
+        return agent, runner
+
     if red_uses_gemini():
         agent = llm_agent.LlmAgent(
             model=advance_model,
@@ -410,7 +424,7 @@ def create_red_agent_advance():
         return agent, runner
 
     raise RuntimeError(
-        "RED_TEAM_PROVIDER phải là openai hoặc gemini. Xem .env.example."
+        "RED_TEAM_PROVIDER phải là openai, gemini hoặc claude. Xem .env.example."
     )
 
 

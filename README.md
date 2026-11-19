@@ -1,5 +1,67 @@
 # Day 11 — Controlled Agent Security (2026)
 
+## Bài nộp
+
+| | |
+|---|---|
+| **Họ tên** | Lê Xuân Hạ |
+| **MSSV** | 2A202603571 |
+| **Lớp** | K5 · L3A · Day 11 |
+| **Blue** | Liquid API (`api.liquid.ai`), model `lfm3-1.7b` |
+| **Red / Red Advance** | Anthropic API, model `claude-haiku-5-5` (NeMo self-check cũng dùng model này) |
+
+> Blue gọi thẳng Liquid API thay cho OpenRouter, Red dùng Claude thay cho `gpt-4o-mini` / `gemini-3.5-flash`. Coach đã đồng ý hai thay đổi này.
+
+### Cách chạy
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+# Điền LIQUID_API_KEY (Blue) và ANTHROPIC_API_KEY (Red), giữ RED_TEAM_PROVIDER=claude
+
+python src/main.py --part 2   # CP2: input / output guardrails (in ra terminal)
+python src/main.py --part 3   # CP3: pipeline → outputs/results.json, audit_log.json, metrics.json
+python src/main.py --part 4   # CP4: tấn công Red + Red Advance → outputs/*attack*.json
+
+pytest tests/smoke tests/public -q
+python scripts/grade.py --submission-dir . --out outputs/grade_report.json
+```
+
+Trên Windows, nếu terminal báo `UnicodeEncodeError` thì chạy `$env:PYTHONIOENCODING="utf-8"` trước.
+
+### Đã làm
+
+| Checkpoint | File | Nội dung |
+|---|---|---|
+| CP2 | `src/guardrails/input_guardrails.py` | Chuẩn hoá Unicode (NFKC, bỏ zero-width, bỏ dấu tiếng Việt), 17 regex injection EN/VI, lọc chủ đề banking, chặn input rỗng / quá dài |
+| CP2 | `src/guardrails/output_guardrails.py` | Che API key, password, `admin123`, host `.internal`, email, SĐT, CCCD; bắt cả secret bị chèn ký tự |
+| CP3 | `src/assignment/rate_limiter.py` | Cửa sổ trượt theo user, mặc định 10 request / 60s |
+| CP3 | `src/assignment/audit_log.py`, `monitoring.py` | Log mỗi request (lớp chặn, latency), metrics và cảnh báo theo ngưỡng |
+| CP3 | `src/assignment/pipeline.py` | Thứ tự lớp: rate limit → input → LLM → output; egress allowlist HTTPS + quét payload; chạy 4 nhóm test |
+| CP4 | `src/attacks/attacks.py` | 5 prompt: completion, reformat / dịch, viết kịch bản, xác nhận, hỏi leo thang |
+| Hạ tầng | `src/core/config.py`, `src/core/anthropic_runtime.py` | Provider Liquid cho Blue; runner Claude và adapter NeMo `LLMModel` dùng Anthropic SDK |
+| Thêm (không chấm) | `src/guardrails/output_guardrails.py` | LLM-as-Judge dùng chính model Blue; chỉ bật khi `use_llm_judge=True` (pipeline mặc định tắt) |
+| Thêm (không chấm) | `src/hitl/hitl.py` | Confidence router (action rủi ro cao luôn escalate) + 3 điểm quyết định HITL cho ngân hàng |
+| Thêm (không chấm) | `src/testing/testing.py` | So sánh Red và Blue trên 5 prompt CP4, báo cáo block / leak; không ghi vào `outputs/` |
+
+Chạy phần thêm: `python src/hitl/hitl.py` · `python src/testing/testing.py`
+
+### Kết quả (từ `outputs/`)
+
+| Hạng mục | Kết quả |
+|---|---|
+| Câu an toàn bị chặn nhầm | 0 / 7 |
+| Câu tấn công bị chặn | 9 / 9 |
+| Rate limit | gửi 15, qua 10, chặn 5 |
+| Egress | 1 cho phép, 5 từ chối |
+| Red lộ secret | 2 / 5 |
+| Red Advance lộ secret | 0 / 5 |
+| Tests | 49 / 49 pass · `grade.py`: `technical_failure: false` |
+
+---
+
 > 👤 **Hình thức:** bài tập **cá nhân** (1 người / 1 MSSV).  
 > 🎯 **Mục tiêu:** đóng vai **Blue Team** để học cách xây Guardrails phòng thủ, rồi đóng vai **Red Team** để tấn công agent **Red** hoặc **Red Advance**.  
 > ✅ Làm theo **Checkpoint 1 → 5** trong [`CHECKPOINTS.md`](CHECKPOINTS.md) · nộp theo [`SUBMISSION.md`](SUBMISSION.md).

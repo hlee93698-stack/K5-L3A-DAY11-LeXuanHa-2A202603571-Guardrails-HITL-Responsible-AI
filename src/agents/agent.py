@@ -22,6 +22,7 @@ from core.config import (
     DEMO_SECRET_NOTE,
     red_uses_openai_sdk,
     red_uses_gemini,
+    red_uses_anthropic,
     red_provider_label,
     blue_provider_label,
     get_red_model_default,
@@ -75,6 +76,21 @@ def create_red_agent_default():
         )
         return agent, runner
 
+    if red_uses_anthropic():
+        from core.anthropic_runtime import create_anthropic_pair
+
+        agent, runner = create_anthropic_pair(
+            name="red_agent_default",
+            instruction=RED_DEFAULT_INSTRUCTION,
+            app_name="red_agent_default",
+            model=soft,
+        )
+        print(
+            f"Red created — NO guardrails! "
+            f"[Red:{red_provider_label('default')}]"
+        )
+        return agent, runner
+
     if red_uses_gemini():
         from google.adk.agents import llm_agent
         from google.adk import runners
@@ -92,7 +108,7 @@ def create_red_agent_default():
         return agent, runner
 
     raise RuntimeError(
-        "RED_TEAM_PROVIDER phải là openai hoặc gemini. Xem .env.example."
+        "RED_TEAM_PROVIDER phải là openai, gemini hoặc claude. Xem .env.example."
     )
 
 

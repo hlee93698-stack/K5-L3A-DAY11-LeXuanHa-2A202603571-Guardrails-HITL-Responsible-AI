@@ -37,29 +37,49 @@ def content_filter(response: str) -> dict:
         dict with 'safe', 'issues', and 'redacted' keys
     """
     issues = []
-    redacted = response
+    redacted = response or ""
 
-    # PII patterns to check
-    PII_PATTERNS = {
-        # TODO: Add regex patterns for:
-        # - VN phone number: r"0\d{9,10}"
-        # - Email: r"[\w.-]+@[\w.-]+\.[a-zA-Z]{2,}"
-        # - National ID (CMND/CCCD): r"\b\d{9}\b|\b\d{12}\b"
-        # - API key pattern: r"sk-[a-zA-Z0-9-]+"
-        # - Password pattern: r"password\s*[:=]\s*\S+"
-    }
-
+    # Thứ tự quan trọng: secret cụ thể trước, PII số sau (tránh CCCD ăn mất SĐT).
     for name, pattern in PII_PATTERNS.items():
-        matches = re.findall(pattern, response, re.IGNORECASE)
+        matches = re.findall(pattern, redacted, re.IGNORECASE)
         if matches:
             issues.append(f"{name}: {len(matches)} found")
             redacted = re.sub(pattern, "[REDACTED]", redacted, flags=re.IGNORECASE)
+
+    # Secret bị "làm méo" (a-d-m-i-n-1-2-3, sk vinbank secret 2024, ...) mà regex
+    # không redact được → coi như leak, withhold toàn bộ câu trả lời.
+    if _contains_obfuscated_secret(redacted):
+        issues.append("obfuscated_secret: 1 found")
+        redacted = WITHHELD_MESSAGE
 
     return {
         "safe": len(issues) == 0,
         "issues": issues,
         "redacted": redacted,
     }
+
+
+PII_PATTERNS = {
+    "api_key": r"\bsk-[A-Za-z0-9_-]{6,}",
+    "password": r"\b(?:admin\s+)?(?:password|passwd|pwd|mật\s*khẩu|mat\s*khau)\b\s*(?:is|=|:|là|la)\s*[\"'`]?[^\s\"'`,;]+",
+    "lab_secret": r"\badmin123\b",
+    "internal_host": r"\b[\w.-]+\.internal(?::\d{2,5})?\b",
+    "email": r"[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-zA-Z]{2,}",
+    "vn_phone": r"(?<!\d)(?:\+?84|0)(?:[\s.-]?\d){9,10}(?!\d)",
+    "national_id": r"(?<!\d)(?:\d{12}|\d{9})(?!\d)",
+}
+
+WITHHELD_MESSAGE = (
+    "[REDACTED] I'm sorry, I can't share confidential or internal information. "
+    "I can help with VinBank accounts, transfers, savings, loans and cards."
+)
+
+_SECRET_NEEDLES = ("admin123", "skvinbanksecret2024", "vinbanksecret2024", "dbvinbankinternal")
+
+
+def _contains_obfuscated_secret(text: str) -> bool:
+    collapsed = re.sub(r"[^a-z0-9]", "", (text or "").casefold())
+    return any(n in collapsed for n in _SECRET_NEEDLES)
 
 
 # ============================================================
@@ -89,25 +109,33 @@ Respond with ONLY one word: SAFE or UNSAFE
 If UNSAFE, add a brief reason on the next line.
 """
 
-# TODO: Create safety_judge_agent using LlmAgent
-# Hint:
-# safety_judge_agent = llm_agent.LlmAgent(
-#     model="gemini-3.5-flash",
-#     name="safety_judge",
-#     instruction=SAFETY_JUDGE_INSTRUCTION,
-# )
-
-safety_judge_agent = None  # TODO: Replace with implementation
+# LLM-as-Judge (optional, không chấm): dùng chính model Blue (Liquid lfm3-1.7b)
+# qua OpenAIRunner — không cần Gemini. Tạo lazy để import module không đòi API key.
+safety_judge_agent = None
 judge_runner = None
 
 
 def _init_judge():
-    """Initialize the judge agent and runner (call after creating the agent)."""
-    global judge_runner
-    if safety_judge_agent is not None:
-        judge_runner = runners.InMemoryRunner(
-            agent=safety_judge_agent, app_name="safety_judge"
+    """Create the judge agent + runner once (no network call until first use)."""
+    global safety_judge_agent, judge_runner
+    if safety_judge_agent is None or judge_runner is None:
+        from core.openai_runtime import create_blue_pair
+
+        safety_judge_agent, judge_runner = create_blue_pair(
+            name="safety_judge",
+            instruction=SAFETY_JUDGE_INSTRUCTION,
+            app_name="safety_judge",
+            plugins=[],
+            temperature=0.0,
         )
+    return safety_judge_agent, judge_runner
+
+
+def _parse_verdict(verdict: str) -> bool:
+    """True = SAFE. Only the first non-empty line decides; unclear output = SAFE
+    (regex layer already ran; the judge is an extra layer)."""
+    first = next((ln.strip() for ln in (verdict or "").splitlines() if ln.strip()), "")
+    return not re.sub(r"[^A-Z]", "", first.upper()).startswith("UNSAFE")
 
 
 async def llm_safety_check(response_text: str) -> dict:
@@ -123,9 +151,12 @@ async def llm_safety_check(response_text: str) -> dict:
         return {"safe": True, "verdict": "Judge not initialized — skipping"}
 
     prompt = f"Evaluate this AI response for safety:\n\n{response_text}"
-    verdict, _ = await chat_with_agent(safety_judge_agent, judge_runner, prompt)
-    is_safe = "SAFE" in verdict.upper() and "UNSAFE" not in verdict.upper()
-    return {"safe": is_safe, "verdict": verdict.strip()}
+    try:
+        verdict, _ = await chat_with_agent(safety_judge_agent, judge_runner, prompt)
+    except Exception as e:  # judge down → don't block; regex layer already ran
+        return {"safe": True, "verdict": f"Judge error — skipping ({type(e).__name__})"}
+    verdict = (verdict or "").strip()
+    return {"safe": _parse_verdict(verdict), "verdict": verdict}
 
 
 # ============================================================
@@ -143,12 +174,15 @@ async def llm_safety_check(response_text: str) -> dict:
 class OutputGuardrailPlugin(base_plugin.BasePlugin):
     """Plugin that checks agent output before sending to user."""
 
-    def __init__(self, use_llm_judge=True):
+    def __init__(self, use_llm_judge=False):
         super().__init__(name="output_guardrail")
-        self.use_llm_judge = use_llm_judge and (safety_judge_agent is not None)
+        if use_llm_judge:
+            _init_judge()
+        self.use_llm_judge = bool(use_llm_judge) and (safety_judge_agent is not None)
         self.blocked_count = 0
         self.redacted_count = 0
         self.total_count = 0
+        self.last_issues: list[str] = []
 
     def _extract_text(self, llm_response) -> str:
         """Extract text from LLM response."""
@@ -172,16 +206,30 @@ class OutputGuardrailPlugin(base_plugin.BasePlugin):
         if not response_text:
             return llm_response
 
-        # TODO: Implement logic:
-        # 1. Call content_filter(response_text)
-        #    - If issues found: replace llm_response.content with redacted version
-        #    - Increment self.redacted_count
-        # 2. If use_llm_judge: call llm_safety_check(response_text)
-        #    - If unsafe: replace llm_response.content with a safe message
-        #    - Increment self.blocked_count
-        # 3. Return llm_response (possibly modified)
+        self.last_issues = []
 
-        return llm_response  # TODO: modify if needed
+        # 1. Regex filter: redact PII / secrets
+        result = content_filter(response_text)
+        if not result["safe"]:
+            self.redacted_count += 1
+            self.last_issues = result["issues"]
+            response_text = result["redacted"]
+            llm_response.content = types.Content(
+                role="model", parts=[types.Part.from_text(text=response_text)]
+            )
+
+        # 2. Optional LLM-as-Judge
+        if self.use_llm_judge:
+            verdict = await llm_safety_check(response_text)
+            if not verdict["safe"]:
+                self.blocked_count += 1
+                self.last_issues.append(f"judge: {verdict['verdict'][:80]}")
+                llm_response.content = types.Content(
+                    role="model",
+                    parts=[types.Part.from_text(text=WITHHELD_MESSAGE)],
+                )
+
+        return llm_response
 
 
 # ============================================================

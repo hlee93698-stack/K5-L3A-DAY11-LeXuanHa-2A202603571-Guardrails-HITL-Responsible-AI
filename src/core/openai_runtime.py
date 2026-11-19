@@ -61,6 +61,16 @@ class OpenAIRunner:
         if block_msg is not None:
             return block_msg
 
+        text = await self._complete(agent, user_message)
+
+        for hook in self.output_hooks:
+            text = hook(text)
+
+        text = await self._run_output_plugins(text)
+        return text
+
+    async def _complete(self, agent: OpenAIAgent, user_message: str) -> str:
+        """One LLM call (OpenAI Chat Completions). Subclasses swap the provider."""
         client = self._client()
         completion = client.chat.completions.create(
             model=self.model,
@@ -70,13 +80,7 @@ class OpenAIRunner:
             ],
             temperature=self.temperature,
         )
-        text = (completion.choices[0].message.content or "").strip()
-
-        for hook in self.output_hooks:
-            text = hook(text)
-
-        text = await self._run_output_plugins(text)
-        return text
+        return (completion.choices[0].message.content or "").strip()
 
     async def _run_input_plugins(self, user_message: str) -> str | None:
         if not self.plugins:

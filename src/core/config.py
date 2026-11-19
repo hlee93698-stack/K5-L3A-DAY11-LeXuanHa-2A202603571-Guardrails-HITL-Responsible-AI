@@ -33,16 +33,23 @@ except ImportError:
 PROVIDER_OPENAI = "openai"
 PROVIDER_GEMINI = "gemini"
 PROVIDER_OPENROUTER = "openrouter"
+PROVIDER_LIQUID = "liquid"
+PROVIDER_ANTHROPIC = "anthropic"
 
 # --- Blue Team (LOCKED) ---
-BLUE_PROVIDER = PROVIDER_OPENROUTER
-BLUE_MODEL = "liquid/lfm-3-1.7b:free"
+# Gọi trực tiếp Liquid API (Liquid Console) thay vì OpenRouter — cùng model LFM3-1.7B.
+# Docs: https://docs.liquid.ai/api/overview · Key: https://console.liquid.ai/dashboard/api-keys
+BLUE_PROVIDER = PROVIDER_LIQUID
+BLUE_MODEL = "lfm3-1.7b"
+LIQUID_BASE_URL = "https://api.liquid.ai/openai/v1"
 OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
-DEFAULT_OPENROUTER_MODEL = BLUE_MODEL  # alias
+DEFAULT_OPENROUTER_MODEL = "liquid/lfm-3-1.7b:free"  # model gốc của starter (không dùng nữa)
 
 # --- Red Team ---
 DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 DEFAULT_GEMINI_MODEL = "gemini-3.5-flash"
+# Claude (Anthropic API) — model rẻ nhất hiện tại: Haiku 5.5 ($0.10 / $0.50 per 1M tokens)
+DEFAULT_CLAUDE_MODEL = "claude-haiku-5-5"
 # Model khó — tuỳ chọn (không phải tên agent; không bắt buộc để có B1/B2)
 HARD_OPENAI_MODEL = "gpt-5.6-luna"
 HARD_GEMINI_MODEL = "gemini-3.8-flash"
@@ -112,13 +119,17 @@ def get_openrouter_api_key() -> str:
     return os.environ.get("OPENROUTER_API_KEY", "").strip()
 
 
+def get_liquid_api_key() -> str:
+    return os.environ.get("LIQUID_API_KEY", "").strip()
+
+
 def blue_client_kwargs() -> dict:
-    """OpenAI SDK kwargs pointing at OpenRouter (Blue Team only)."""
+    """OpenAI SDK kwargs pointing at Liquid API (Blue Team only)."""
     return {
-        "api_key": get_openrouter_api_key() or None,
+        "api_key": get_liquid_api_key() or None,
         "base_url": (
-            os.environ.get("OPENROUTER_BASE_URL", OPENROUTER_BASE_URL).strip()
-            or OPENROUTER_BASE_URL
+            os.environ.get("LIQUID_BASE_URL", LIQUID_BASE_URL).strip()
+            or LIQUID_BASE_URL
         ),
     }
 
@@ -139,11 +150,18 @@ def get_red_provider() -> str:
     ).strip().lower()
     if raw in {"gemini", "google", "adk"}:
         return PROVIDER_GEMINI
+    if raw in {"claude", "anthropic"}:
+        return PROVIDER_ANTHROPIC
     return PROVIDER_OPENAI
 
 
 def get_red_model() -> str:
     """Model Red Team từ .env (cùng cho default + advance)."""
+    if get_red_provider() == PROVIDER_ANTHROPIC:
+        return (
+            os.environ.get("CLAUDE_MODEL", DEFAULT_CLAUDE_MODEL).strip()
+            or DEFAULT_CLAUDE_MODEL
+        )
     if get_red_provider() == PROVIDER_GEMINI:
         return (
             os.environ.get("GEMINI_MODEL", DEFAULT_GEMINI_MODEL).strip()
@@ -187,6 +205,14 @@ def red_uses_gemini() -> bool:
     return get_red_provider() == PROVIDER_GEMINI
 
 
+def red_uses_anthropic() -> bool:
+    return get_red_provider() == PROVIDER_ANTHROPIC
+
+
+def get_anthropic_api_key() -> str:
+    return os.environ.get("ANTHROPIC_API_KEY", "").strip()
+
+
 # ---------------------------------------------------------------------------
 # Backward-compatible aliases (mean RED TEAM — used by attack JSON / grade)
 # ---------------------------------------------------------------------------
@@ -217,7 +243,7 @@ def provider_label() -> str:
 def is_harder_model() -> bool:
     """True nếu .env đang trỏ model khó (luna / 3.8) — tuỳ chọn, không phải tên agent."""
     m = get_red_model().lower()
-    if m in {DEFAULT_OPENAI_MODEL.lower(), DEFAULT_GEMINI_MODEL.lower()}:
+    if m in {DEFAULT_OPENAI_MODEL.lower(), DEFAULT_GEMINI_MODEL.lower(), DEFAULT_CLAUDE_MODEL.lower()}:
         return False
     hard = {
         HARD_OPENAI_MODEL.lower(),
@@ -235,10 +261,10 @@ def is_harder_model() -> bool:
 
 
 def setup_api_key():
-    """Ensure keys for Blue (OpenRouter) + Red / Red Advance (OpenAI or Gemini)."""
-    if not get_openrouter_api_key():
-        os.environ["OPENROUTER_API_KEY"] = input(
-            "Enter OpenRouter API Key (Blue): "
+    """Ensure keys for Blue (Liquid API) + Red / Red Advance (OpenAI or Gemini)."""
+    if not get_liquid_api_key():
+        os.environ["LIQUID_API_KEY"] = input(
+            "Enter Liquid API Key (Blue): "
         ).strip()
     print(f"Blue  — {blue_provider_label()}  [LOCKED]")
 
@@ -249,6 +275,10 @@ def setup_api_key():
             os.environ["GOOGLE_API_KEY"] = input("Enter Google API Key (Red): ").strip()
         os.environ["GOOGLE_GENAI_USE_VERTEXAI"] = "0"
         print(f"Red / Red Advance  — gemini:{model}")
+    elif red == PROVIDER_ANTHROPIC:
+        if not get_anthropic_api_key():
+            os.environ["ANTHROPIC_API_KEY"] = input("Enter Anthropic API Key (Red): ").strip()
+        print(f"Red / Red Advance  — anthropic:{model}")
     else:
         if not get_openai_api_key():
             os.environ["OPENAI_API_KEY"] = input("Enter OpenAI API Key (Red): ").strip()

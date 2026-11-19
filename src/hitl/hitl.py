@@ -67,32 +67,50 @@ class ConfidenceRouter:
         Returns:
             RoutingDecision with routing action and metadata
         """
-        # Optional: Implement routing logic
-        #
-        # 1. Check if action_type is in HIGH_RISK_ACTIONS
-        #    -> If yes: always escalate (action="escalate", priority="high",
-        #       requires_human=True, reason="High-risk action: {action_type}")
-        #
-        # 2. Check confidence thresholds:
-        #    - confidence >= 0.9:
-        #      action="auto_send", priority="low",
-        #      requires_human=False, reason="High confidence"
-        #
-        #    - 0.7 <= confidence < 0.9:
-        #      action="queue_review", priority="normal",
-        #      requires_human=True, reason="Medium confidence — needs review"
-        #
-        #    - confidence < 0.7:
-        #      action="escalate", priority="high",
-        #      requires_human=True, reason="Low confidence — escalating"
+        # Clamp so a bad score (NaN, <0, >1) can never auto-send.
+        try:
+            conf = float(confidence)
+        except (TypeError, ValueError):
+            conf = 0.0
+        if conf != conf:  # NaN
+            conf = 0.0
+        conf = min(max(conf, 0.0), 1.0)
+
+        action_key = (action_type or "general").strip().lower()
+        if action_key in HIGH_RISK_ACTIONS:
+            return RoutingDecision(
+                action="escalate",
+                confidence=conf,
+                reason=f"High-risk action: {action_key}",
+                priority="high",
+                requires_human=True,
+            )
+
+        if conf >= self.HIGH_THRESHOLD:
+            return RoutingDecision(
+                action="auto_send",
+                confidence=conf,
+                reason="High confidence",
+                priority="low",
+                requires_human=False,
+            )
+
+        if conf >= self.MEDIUM_THRESHOLD:
+            return RoutingDecision(
+                action="queue_review",
+                confidence=conf,
+                reason="Medium confidence — needs review",
+                priority="normal",
+                requires_human=True,
+            )
 
         return RoutingDecision(
-            action="auto_send",
-            confidence=confidence,
-            reason="TODO: implement routing logic",
-            priority="low",
-            requires_human=False,
-        )  # TODO: Replace with implementation
+            action="escalate",
+            confidence=conf,
+            reason="Low confidence — escalating",
+            priority="high",
+            requires_human=True,
+        )
 
 
 # ============================================================
@@ -115,33 +133,79 @@ class ConfidenceRouter:
 hitl_decision_points = [
     {
         "id": 1,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Chuyển tiền giá trị lớn / tới người nhận mới",
+        "trigger": (
+            "Agent đề xuất transfer_money với số tiền >= 50.000.000 VND, "
+            "hoặc người nhận chưa từng giao dịch, hoặc ConfidenceRouter trả về escalate."
+        ),
+        "hitl_model": "human-in-the-loop",
+        "context_needed": (
+            "Số tài khoản nguồn/đích (che bớt), số tiền, lịch sử 30 ngày, "
+            "điểm rủi ro gian lận, đoạn hội thoại dẫn tới yêu cầu, kết quả xác thực OTP."
+        ),
+        "example": (
+            "Khách nhắn 'chuyển gấp 120 triệu cho tài khoản mới, đang bị công an gọi' — "
+            "dấu hiệu lừa đảo giả danh; giao dịch bị giữ lại chờ nhân viên gọi xác minh."
+        ),
+        "approval_path": (
+            "Approve → thực hiện giao dịch và gửi biên nhận; Reject → huỷ, báo khách lý do "
+            "chung chung + hotline; Timeout 15 phút → tự huỷ (fail-closed), không bao giờ tự duyệt."
+        ),
+        "audit_fields": (
+            "correlation_id, user_id, intent=transfer_money, amount, payee_hash, "
+            "risk_score, proposed_action, reviewer_id, decision, decided_at"
+        ),
     },
     {
         "id": 2,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Thay đổi thông tin định danh / bảo mật tài khoản",
+        "trigger": (
+            "Action thuộc change_password, update_personal_info hoặc close_account — "
+            "luôn escalate theo HIGH_RISK_ACTIONS, bất kể confidence."
+        ),
+        "hitl_model": "human-in-the-loop",
+        "context_needed": (
+            "Diff trước/sau (SĐT, email, địa chỉ), kênh yêu cầu, thiết bị/IP mới hay cũ, "
+            "lần đổi gần nhất, kết quả eKYC."
+        ),
+        "example": (
+            "Yêu cầu đổi số điện thoại nhận OTP từ thiết bị lạ lúc 2h sáng, ngay sau đó "
+            "đòi đóng tài khoản tiết kiệm — nhân viên khoá tạm và liên hệ số cũ."
+        ),
+        "approval_path": (
+            "Approve → áp dụng diff, gửi thông báo tới kênh cũ; Reject → giữ nguyên, khoá "
+            "tạm 24h nếu nghi chiếm đoạt; Timeout 30 phút → giữ nguyên trạng thái."
+        ),
+        "audit_fields": (
+            "correlation_id, user_id, intent, field_diff (đã che PII), device_id, ip, "
+            "reviewer_id, decision, reason_code, decided_at"
+        ),
     },
     {
         "id": 3,
-        "name": "TODO: Name this decision point",
-        "trigger": "TODO: When does this trigger?",
-        "hitl_model": "TODO: human-in-the-loop / human-on-the-loop / human-as-tiebreaker",
-        "context_needed": "TODO: What does the reviewer need to see?",
-        "example": "TODO: Give a concrete example scenario",
-        "approval_path": "TODO: Explain approve, reject and timeout behavior",
-        "audit_fields": "TODO: List correlation ID, intent, diff and reviewer decision",
+        "name": "Phản hồi bị guardrail/judge nghi ngờ",
+        "trigger": (
+            "OutputGuardrailPlugin redact secret/PII, LLM-judge trả UNSAFE, hoặc "
+            "confidence trong khoảng 0.7–0.9 (queue_review)."
+        ),
+        "hitl_model": "human-on-the-loop",
+        "context_needed": (
+            "Câu hỏi gốc, phản hồi gốc và bản đã redact, danh sách issues, verdict của judge, "
+            "lớp đã chặn trong audit log."
+        ),
+        "example": (
+            "Agent trả lời lãi suất 5.5% trong khi bảng chuẩn là 4.25% — judge đánh dấu "
+            "hallucination; khách nhận câu trả lời an toàn, reviewer sửa nội dung sau."
+        ),
+        "approval_path": (
+            "Khách nhận bản an toàn ngay; reviewer xem hàng đợi: Approve → đánh dấu false "
+            "positive để chỉnh rule; Reject → gắn nhãn sự cố, cập nhật test; "
+            "Timeout 24h → tự đóng, vẫn giữ bản đã chặn."
+        ),
+        "audit_fields": (
+            "correlation_id, request_id, layer, issues, judge_verdict, original_hash, "
+            "redacted_preview, reviewer_id, label, decided_at"
+        ),
     },
 ]
 

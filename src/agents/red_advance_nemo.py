@@ -36,6 +36,7 @@ from typing import Any, Optional
 from agents.security_boundary import contains_secret, normalize_for_security
 from core.config import (
     DEMO_SECRETS,
+    PROVIDER_ANTHROPIC,
     PROVIDER_GEMINI,
     get_red_model,
     get_red_provider,
@@ -327,6 +328,11 @@ class NemoRailsGuard:
         nemoguardrails = require_nemo()
         from nemoguardrails import LLMRails
 
+        if llm is None and get_red_provider() == PROVIDER_ANTHROPIC:
+            # NeMo không có engine Claude native → adapter LLMModel dùng Anthropic SDK.
+            from core.anthropic_runtime import AnthropicNemoModel
+
+            llm = AnthropicNemoModel()
         if config is None:
             config = build_rails_config(include_model=llm is None)
         self.version = getattr(nemoguardrails, "__version__", "?")
